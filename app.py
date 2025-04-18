@@ -1,241 +1,243 @@
+"""
+Dependências exigidas:
+  pip install google-api-python-client google-cloud-secret-manager google-auth
+"""
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 import os
-import pickle
 import json
+import re
 import base64
-import io
 
-from PIL import Image, ImageDraw, ImageFont
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
+from pathlib import Path
 from google.cloud import secretmanager
+from google.oauth2 import service_account
+from google.api_core.exceptions import NotFound
+from googleapiclient.discovery import build
 
 # --- Configuração da Página ---
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="Dashboard de Cadastros", layout="centered")
 
-# --- Credenciais (usuários e senhas) ---
-USERS = {
-    "Lara": "9096",
-    "Edy": "1993",
-    "Camilla": "1989",
-    "Valeria": "Ze2024",
-    "OutroUsuario": "Senha456"
-}
+# --- Fundo e logo ---
+if Path("fundo.png").exists():
+    with open("fundo.png", "rb") as f:
+        encoded = base64.b64encode(f.read()).decode()
+    st.markdown(
+        f'''
+        <style>
+        .stApp {{
+            background-image: url('data:image/png;base64,{encoded}');
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+        }}
+        </style>
+        ''',
+        unsafe_allow_html=True
+    )
 
-# --- Constantes e Escopos ---
-SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets']
-API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyC60Hd8LEQvj8-c25rHcWFv_lZSyrvmyGY")
-TOKEN_PICKLE = 'token.pickle'
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", '1JhRsHpySEpJbefsZTbTjlh3QuyZUzFtx1OMuHDLChx4')
-PROJECT_ID = os.getenv("GCP_PROJECT_ID", "elo-solutions")
-SECRET_ID = os.getenv("GCP_SECRET_ID", "CLIENT_SECRETS")
+if Path("logo.png").exists():
+    st.image("logo.png", width=150)
 
-# --- Utilitários ---
-def get_base64_of_bin_file(bin_file: str) -> str:
+# --- Configurações ---
+PROJECT_ID = os.getenv("GCP_PROJECT_ID", "clear-incentive-410218")
+SECRET_USERS = os.getenv("GCP_SECRET_ID_USERS", "USER_CREDENTIALS")
+SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+SERVICE_ACCOUNT_FILE = os.getenv(
+    "GOOGLE_SERVICE_ACCOUNT_FILE",
+    str(Path(__file__).parent / "minha-sa-key.json")
+)
+
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+if not SPREADSHEET_ID:
+    st.error("Por favor defina a variável de ambiente SPREADSHEET_ID com o ID da sua planilha e reinicie o aplicativo.")
+    st.stop()
+
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+@st.cache_data
+def get_secret(secret_id: str) -> str:
+    env_val = os.getenv(secret_id)
+    if env_val:
+        return env_val
+
+    creds = None
+    if SERVICE_ACCOUNT_JSON and SERVICE_ACCOUNT_JSON.strip().startswith("{"):
+        info = json.loads(SERVICE_ACCOUNT_JSON)
+        creds = service_account.Credentials.from_service_account_info(info)
+    elif os.path.isfile(SERVICE_ACCOUNT_FILE):
+        creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE)
+
+    client = secretmanager.SecretManagerServiceClient(credentials=creds) if creds else secretmanager.SecretManagerServiceClient()
+    name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/latest"
     try:
-        with open(bin_file, "rb") as f:
-            return base64.b64encode(f.read()).decode()
-    except FileNotFoundError:
+        response = client.access_secret_version(request={"name": name})
+        return response.payload.data.decode("UTF-8")
+    except NotFound:
         return ""
 
+users_json = get_secret(SECRET_USERS)
+try:
+    USERS = json.loads(users_json)
+    if not isinstance(USERS, dict) or not USERS:
+        raise ValueError
+except Exception:
+    USERS = {
+        "Lara": "9096",
+        "Edy": "1993",
+        "Camilla": "1989",
+        "Valeria": "Ze2024",
+        "OutroUsuario": "Senha456"
+    }
 
-def set_bg_from_local(image_file: str):
-    b64 = get_base64_of_bin_file(image_file)
-    if b64:
-        st.markdown(f"""
-        <style>
-        .stApp {{ background-image: url('data:image/png;base64,{b64}'); background-size: cover; background-attachment: fixed; }}
-        </style>
-        """, unsafe_allow_html=True)
+# --- Funções auxiliares ---
+def col_idx_to_letter(idx: int) -> str:
+    letters = ''
+    while idx >= 0:
+        letters = chr(ord('A') + (idx % 26)) + letters
+        idx = idx // 26 - 1
+    return letters
 
+def validate_cpf_cnpj(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{11}|\d{14}", re.sub(r"\D", "", value)))
 
-def format_currency_br(value: float) -> str:
-    return "R$ {:,.2f}".format(value).replace(",", "TMP").replace(".", ",").replace("TMP", ".")
+def get_sheets_service():
+    if SERVICE_ACCOUNT_JSON and SERVICE_ACCOUNT_JSON.strip().startswith("{"):
+        info = json.loads(SERVICE_ACCOUNT_JSON)
+        creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    else:
+        creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+    return build('sheets', 'v4', credentials=creds)
 
-# --- Google Authentication & Sheets Helpers ---
-def get_client_secrets():
+def save_to_sheet(data: list, sheet_name: str):
     try:
-        client = secretmanager.SecretManagerServiceClient()
-        name = f"projects/{PROJECT_ID}/secrets/{SECRET_ID}/versions/latest"
-        resp = client.access_secret_version(request={"name": name})
-        return json.loads(resp.payload.data.decode())
+        service = get_sheets_service()
+        with st.spinner("Gravando na planilha..."):
+            return service.spreadsheets().values().append(
+                spreadsheetId=SPREADSHEET_ID,
+                range=sheet_name,
+                valueInputOption='USER_ENTERED',
+                body={"values": [data]}
+            ).execute()
     except Exception as e:
-        st.error(f"Erro ao acessar secret: {e}")
-        return None
+        st.error(f"Falha ao gravar na planilha: {e}")
 
-
-def authenticate_google():
-    creds = None
-    if os.path.exists(TOKEN_PICKLE):
-        with open(TOKEN_PICKLE, 'rb') as token:
-            creds = pickle.load(token)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                st.error(f"Falha ao atualizar token: {e}")
-        else:
-            config = get_client_secrets()
-            if not config:
-                return None
-            flow = InstalledAppFlow.from_client_config(config, SCOPES)
-            flow.redirect_uri = 'http://localhost:8501'
-            creds = flow.run_local_server(port=8501)
-        with open(TOKEN_PICKLE, 'wb') as token:
-            pickle.dump(creds, token)
-    return creds
-
-
-def save_to_sheet(data: list, sheet_name='Sheet1'):
-    creds = authenticate_google()
-    if not creds:
-        return None
-    service = build('sheets', 'v4', credentials=creds, developerKey=API_KEY)
-    return service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=sheet_name,
-        valueInputOption='USER_ENTERED',
-        body={"values": [data]}
-    ).execute()
-
-
-def fetch_sheet(sheet_name='Sheet1') -> pd.DataFrame:
-    creds = authenticate_google()
-    if not creds:
+def fetch_sheet(sheet_name: str) -> pd.DataFrame:
+    try:
+        service = get_sheets_service()
+        res = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"{sheet_name}!A1:Z"
+        ).execute()
+        vals = res.get('values', [])
+        if len(vals) < 2:
+            return pd.DataFrame()
+        df = pd.DataFrame(vals[1:], columns=vals[0])
+        df.columns = [col.strip() for col in df.columns]
+        return df
+    except Exception as e:
+        st.error(f"Falha ao buscar dados da planilha: {e}")
         return pd.DataFrame()
-    service = build('sheets', 'v4', credentials=creds, developerKey=API_KEY)
-    res = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f"{sheet_name}!A1:Z"
-    ).execute()
-    vals = res.get('values', [])
-    if len(vals) < 2:
-        return pd.DataFrame()
-    return pd.DataFrame(vals[1:], columns=vals[0])
-
 
 def update_sheet(sheet_name: str, idx: int, data: list):
-    creds = authenticate_google()
-    if not creds:
-        return None
-    service = build('sheets', 'v4', credentials=creds, developerKey=API_KEY)
-    row_num = idx + 2
-    last_col = chr(ord('A') + len(data) - 1)
-    rng = f"{sheet_name}!A{row_num}:{last_col}{row_num}"
-    return service.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID,
-        range=rng,
-        valueInputOption='USER_ENTERED',
-        body={"values": [data]}
-    ).execute()
+    try:
+        service = get_sheets_service()
+        row = idx + 2
+        last_col = col_idx_to_letter(len(data) - 1)
+        rng = f"{sheet_name}!A{row}:{last_col}{row}"
+        with st.spinner("Atualizando registro..."):
+            return service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID,
+                range=rng,
+                valueInputOption='USER_ENTERED',
+                body={"values": [data]}
+            ).execute()
+    except Exception as e:
+        st.error(f"Falha ao atualizar planilha: {e}")
 
-# --- UI Components ---
 def display_login():
     st.title("Tela de Login")
-    set_bg_from_local("fundo.png")
     user = st.text_input("Usuário", key="username")
     pwd = st.text_input("Senha", type="password", key="password")
     if st.button("Entrar"):
         if USERS.get(user) == pwd:
             st.session_state['authenticated'] = True
+            st.success(f"Bem-vindo, {user}!")
         else:
-            st.error("Credenciais inválidas.")
-
+            st.error("Credenciais inválidas. Tente novamente.")
 
 def display_dashboard():
-    if os.path.exists("logo.png"): st.image("logo.png", width=200)
     st.title("Dashboard de Cadastros")
-    # Define três abas: Cadastro, Consulta e Editar
     tabs = st.tabs(["Cadastro de Clientes", "🔎 Consulta", "✏️ Editar"])
-    states = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"]
+    estados = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA",
+               "MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS",
+               "RO","RR","SC","SP","SE","TO"]
 
-    # Aba Cadastro de Clientes
     with tabs[0]:
-        tipo = st.radio("Tipo de Cadastro", ["MEI","Pessoa Física"], key="cad_tipo")
+        tipo = st.radio("Tipo de Cadastro", ["MEI", "Pessoa Física"])
         with st.form("cad_form"):
             if tipo == "MEI":
-                ne = st.text_input('Nome da Empresa', key="nm_e")
-                nr = st.text_input('Nome do Responsável', key="nr")
-                tel = st.text_input('Telefone', key="tel")
-                em = st.text_input('Email', key="em")
-                sg = st.text_input('Senha Gov.br', key="sg")
-                est = st.selectbox('Estado', states, key="est")
-                cn = st.text_input('CNPJ', key="cn")
-                cf = st.text_input('CPF', key="cf")
-                sm = st.selectbox('Status MEI', ['Ativo','Baixado'], key="sm")
-                sb = st.form_submit_button('Cadastrar MEI')
-                if sb:
-                    authenticate_google()
-                    save_to_sheet([ne,nr,tel,em,sg,est,cn,cf,sm], 'Sheet1')
-                    st.success('MEI cadastrado com sucesso!')
-            else:
-                pf = [
-                    st.text_input('Nome Completo', key="pf_n"),
-                    st.text_input('Telefone', key="pf_t"),
-                    st.text_input('Email', key="pf_e"),
-                    st.text_input('RG', key="pf_rg"),
-                    st.text_input('CPF', key="pf_cf"),
-                    st.text_input('Senha Gov.br', key="pf_sg"),
-                    st.text_input('Endereço', key="pf_en"),
-                    st.text_input('Cidade', key="pf_c"),
-                    st.text_input('CEP', key="pf_cep"),
-                    st.selectbox('Estado', states, key="pf_est"),
-                    st.text_input('Chave Pix', key="pf_pix"),
-                    st.selectbox('Bens Imóveis', ['Sim','Não'], key="pf_bi"),
-                    st.selectbox('Bens Móveis', ['Sim','Não'], key="pf_bm"),
-                    st.selectbox('Dependentes', ['Sim','Não'], key="pf_dep")
+                campos = [
+                    st.text_input('Nome da Empresa'),
+                    st.text_input('Nome do Responsável'),
+                    st.text_input('Telefone'),
+                    st.text_input('Email'),
+                    st.text_input('Senha Gov.br'),
+                    st.selectbox('Estado', estados),
+                    st.text_input('CNPJ'),
+                    st.text_input('CPF'),
+                    st.selectbox('Status MEI', ['Ativo', 'Baixado'])
                 ]
-                sb2 = st.form_submit_button('Cadastrar PF')
-                if sb2:
-                    authenticate_google()
-                    save_to_sheet(pf, 'Sheet2')
-                    st.success('Pessoa Física cadastrada com sucesso!')
+                if st.form_submit_button('Cadastrar MEI'):
+                    if not validate_cpf_cnpj(campos[6]) or not validate_cpf_cnpj(campos[7]):
+                        st.error("CNPJ/CPF inválido.")
+                    else:
+                        save_to_sheet(campos, 'Sheet1')
+                        st.success("Cadastro realizado com sucesso!")
+            else:
+                campos_pf = [
+                    st.text_input('Nome Completo'),
+                    st.text_input('Telefone'),
+                    st.text_input('Email'),
+                    st.text_input('CPF'),
+                    st.selectbox('Estado', estados)
+                ]
+                if st.form_submit_button('Cadastrar Pessoa Física'):
+                    if not validate_cpf_cnpj(campos_pf[3]):
+                        st.error("CPF inválido.")
+                    else:
+                        save_to_sheet(campos_pf, 'Sheet2')
+                        st.success("Cadastro de Pessoa Física salvo!")
 
-    # Aba Consulta de Cadastros
     with tabs[1]:
-        df_mei = fetch_sheet('Sheet1')
-        df_pf = fetch_sheet('Sheet2')
-        st.header('Cadastros MEI')
-        if not df_mei.empty:
-            st.dataframe(df_mei)
-        else:
-            st.info('Nenhum MEI cadastrado.')
-        st.header('Cadastros Pessoa Física')
-        if not df_pf.empty:
-            st.dataframe(df_pf)
-        else:
-            st.info('Nenhuma Pessoa Física cadastrada.')
+        st.subheader("Cadastros MEI")
+        df_mei = fetch_sheet("Sheet1")
+        st.dataframe(df_mei)
 
-    # Aba Editar Cadastros
+        st.subheader("Cadastros Pessoa Física")
+        df_pf = fetch_sheet("Sheet2")
+        st.dataframe(df_pf)
+
     with tabs[2]:
-        df = fetch_sheet('Sheet1')
+        tipo = st.radio("Tipo de Registro", ["MEI", "Pessoa Física"])
+        sheet_name = "Sheet1" if tipo == "MEI" else "Sheet2"
+        df = fetch_sheet(sheet_name)
         if df.empty:
-            st.info('Nenhum cadastro disponível para edição.')
+            st.info("Nenhum cadastro encontrado.")
         else:
-            sel = st.selectbox('Selecione MEI', [f"{i} - {r['Nome da Empresa']}" for i,r in df.iterrows()], key='ed_sel')
-            idx = int(sel.split(' - ')[0])
-            reg = df.loc[idx]
-            with st.form('edit_form'):
-                ne = st.text_input('Nome da Empresa', value=reg['Nome da Empresa'], key='ed_ne')
-                nr = st.text_input('Nome do Responsável', value=reg['Nome do Responsável'], key='ed_nr')
-                tel = st.text_input('Telefone', value=reg['Telefone'], key='ed_tel')
-                em = st.text_input('Email', value=reg['Email'], key='ed_em')
-                sg = st.text_input('Senha Gov.br', value=reg['Senha Gov.br'], key='ed_sg')
-                est = st.selectbox('Estado', states, index=states.index(reg['Estado']), key='ed_est')
-                cn = st.text_input('CNPJ', value=reg['CNPJ'], key='ed_cn')
-                cf = st.text_input('CPF', value=reg['CPF'], key='ed_cf')
-                sm = st.selectbox('Status MEI', ['Ativo','Baixado'], index=0 if reg['Status MEI']=='Ativo' else 1, key='ed_sm')
-                sb3 = st.form_submit_button('Salvar Alterações')
-                if sb3:
-                    authenticate_google()
-                    update_sheet('Sheet1', idx, [ne,nr,tel,em,sg,est,cn,cf,sm])
-                    st.success('Cadastro atualizado com sucesso!')
+            idx_map = {f"{i} - {df.iloc[i, 0]}": i for i in df.index}
+            sel_label = st.selectbox("Selecione o registro", list(idx_map.keys()))
+            idx = idx_map[sel_label]
+            registro = df.loc[idx]
+            with st.form("edit_form"):
+                inputs = [
+                    st.text_input(col, value=registro[col]) for col in df.columns
+                ]
+                if st.form_submit_button("Salvar alterações"):
+                    update_sheet(sheet_name, idx, inputs)
+                    st.success("Cadastro atualizado com sucesso!")
 
-# Chamada principal
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 
