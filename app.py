@@ -41,7 +41,7 @@ if Path("logo.png").exists():
     st.image("logo.png", width=150)
 
 # --- Configurações ---
-PROJECT_ID = os.getenv("GCP_PROJECT_ID", "clear-incentive-410218")
+PROJECT_ID = os.getenv("GCP_PROJECT_ID", "lararorizinc")
 SECRET_USERS = os.getenv("GCP_SECRET_ID_USERS", "USER_CREDENTIALS")
 SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 SERVICE_ACCOUNT_FILE = os.getenv(
