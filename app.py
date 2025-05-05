@@ -1,7 +1,4 @@
-"""
-Dependências exigidas:
-  pip install google-api-python-client google-cloud-secret-manager google-auth
-"""
+# --- Configurações Iniciais ---
 import streamlit as st
 import pandas as pd
 import os
@@ -15,10 +12,9 @@ from google.oauth2 import service_account
 from google.api_core.exceptions import NotFound
 from googleapiclient.discovery import build
 
-# --- Configuração da Página ---
+# --- Aparência da página ---
 st.set_page_config(page_title="Dashboard de Cadastros", layout="centered", initial_sidebar_state="collapsed")
 
-# --- Fundo e logo ---
 if Path("fundo.png").exists():
     with open("fundo.png", "rb") as f:
         encoded = base64.b64encode(f.read()).decode()
@@ -40,26 +36,35 @@ if Path("fundo.png").exists():
 if Path("logo.png").exists():
     st.image("logo.png", width=150)
 
-# --- Configurações ---
-
-# Carregar variáveis do secrets.toml manualmente (caso existam)
+# --- Carregamento das variáveis do secrets.toml ---
 for key in ["GOOGLE_SERVICE_ACCOUNT_JSON", "SPREADSHEET_ID", "USER_CREDENTIALS"]:
     if key in st.secrets:
         os.environ[key] = st.secrets[key]
-PROJECT_ID = os.getenv("GCP_PROJECT_ID", "lararorizinc")
-SECRET_USERS = os.getenv("GCP_SECRET_ID_USERS", "USER_CREDENTIALS")
+
 SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 SERVICE_ACCOUNT_FILE = os.getenv(
     "GOOGLE_SERVICE_ACCOUNT_FILE",
     str(Path(__file__).parent / "minha-sa-key.json")
 )
+DEFAULT_PROJECT_ID = "lararorizinc"
+PROJECT_ID = DEFAULT_PROJECT_ID
 
+if SERVICE_ACCOUNT_JSON and SERVICE_ACCOUNT_JSON.strip().startswith("{"):
+    try:
+        info = json.loads(SERVICE_ACCOUNT_JSON)
+        PROJECT_ID = info.get("project_id", DEFAULT_PROJECT_ID)
+        st.sidebar.info(f"📌 PROJECT_ID definido como '{PROJECT_ID}' a partir do JSON da conta de serviço")
+    except Exception as e:
+        st.sidebar.warning(f"⚠️ Erro ao analisar GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
+
+SECRET_USERS = os.getenv("GCP_SECRET_ID_USERS", "USER_CREDENTIALS")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 @st.cache_data
 def get_secret(secret_id: str) -> str:
     env_val = os.getenv(secret_id)
     if env_val:
+        st.sidebar.success(f"✅ Variável {secret_id} carregada localmente.")
         return env_val
 
     creds = None
@@ -73,31 +78,20 @@ def get_secret(secret_id: str) -> str:
     name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/latest"
     try:
         response = client.access_secret_version(request={"name": name})
-        return response.payload.data.decode("UTF-8")
+        payload = response.payload.data.decode("UTF-8")
+        st.sidebar.success(f"🔐 {secret_id} carregado do Secret Manager")
+        return payload
     except NotFound:
-        st.error(f"Segredo '{secret_id}' não encontrado no projeto {PROJECT_ID}.")
+        st.sidebar.warning(f"⚠️ Segredo '{secret_id}' não encontrado no projeto {PROJECT_ID}.")
         return ""
     except Exception as e:
-        st.error(f"Erro ao acessar o segredo '{secret_id}': {e}")
+        st.sidebar.error(f"Erro ao acessar o segredo '{secret_id}': {e}")
         return ""
 
-if os.getenv("SPREADSHEET_ID"):
-    SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-    st.sidebar.info("SPREADSHEET_ID carregado do secrets.toml (fallback)")
-else:
-    try:
-        SPREADSHEET_ID = get_secret("SPREADSHEET_ID")
-        if SPREADSHEET_ID:
-            st.sidebar.success("ID da planilha carregado via Secret Manager")
-        else:
-            raise ValueError("SPREADSHEET_ID vazio")
-    except Exception as e:
-        st.sidebar.warning("Erro ao acessar Secret Manager: fallback necessário")
-        SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-        if not SPREADSHEET_ID:
-            st.sidebar.error("SPREADSHEET_ID não encontrado.")
-            st.error("SPREADSHEET_ID não encontrado no Secret Manager nem como variável de ambiente.")
-            st.stop()
+SPREADSHEET_ID = get_secret("SPREADSHEET_ID")
+if not SPREADSHEET_ID:
+    st.error("SPREADSHEET_ID não encontrado. Verifique .streamlit/secrets.toml ou Secret Manager.")
+    st.stop()
 
 users_json = get_secret(SECRET_USERS)
 try:
@@ -113,7 +107,17 @@ except Exception:
         "OutroUsuario": "Senha456"
     }
 
-# --- Funções auxiliares ---
+# --- Diagnóstico do ambiente ---
+st.sidebar.subheader("🔎 Diagnóstico")
+st.sidebar.code(json.dumps({
+    "PROJECT_ID": PROJECT_ID,
+    "SPREADSHEET_ID": SPREADSHEET_ID,
+    "SECRET_USERS": SECRET_USERS,
+    "SERVICE_ACCOUNT_JSON": bool(SERVICE_ACCOUNT_JSON),
+    "SERVICE_ACCOUNT_FILE": Path(SERVICE_ACCOUNT_FILE).exists()
+}, indent=2), language='json')
+
+# --- Auxiliares Google Sheets ---
 def col_idx_to_letter(idx: int) -> str:
     letters = ''
     while idx >= 0:
@@ -178,6 +182,7 @@ def update_sheet(sheet_name: str, idx: int, data: list):
     except Exception as e:
         st.error(f"Falha ao atualizar planilha: {e}")
 
+# --- Interface de Login e Dashboard ---
 def display_login():
     st.title("Tela de Login")
     user = st.text_input("Usuário", key="username")
@@ -260,6 +265,7 @@ def display_dashboard():
                     update_sheet(sheet_name, idx, inputs)
                     st.success("Cadastro atualizado com sucesso!")
 
+# --- Execução ---
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 
