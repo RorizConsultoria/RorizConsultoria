@@ -16,7 +16,7 @@ from google.api_core.exceptions import NotFound
 from googleapiclient.discovery import build
 
 # --- Configuração da Página ---
-st.set_page_config(page_title="Dashboard de Cadastros", layout="centered")
+st.set_page_config(page_title="Dashboard de Cadastros", layout="centered", initial_sidebar_state="collapsed")
 
 # --- Fundo e logo ---
 if Path("fundo.png").exists():
@@ -41,6 +41,11 @@ if Path("logo.png").exists():
     st.image("logo.png", width=150)
 
 # --- Configurações ---
+
+# Carregar variáveis do secrets.toml manualmente (caso existam)
+for key in ["GOOGLE_SERVICE_ACCOUNT_JSON", "SPREADSHEET_ID", "USER_CREDENTIALS"]:
+    if key in st.secrets:
+        os.environ[key] = st.secrets[key]
 PROJECT_ID = os.getenv("GCP_PROJECT_ID", "lararorizinc")
 SECRET_USERS = os.getenv("GCP_SECRET_ID_USERS", "USER_CREDENTIALS")
 SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -48,11 +53,6 @@ SERVICE_ACCOUNT_FILE = os.getenv(
     "GOOGLE_SERVICE_ACCOUNT_FILE",
     str(Path(__file__).parent / "minha-sa-key.json")
 )
-
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-if not SPREADSHEET_ID:
-    st.error("Por favor defina a variável de ambiente SPREADSHEET_ID com o ID da sua planilha e reinicie o aplicativo.")
-    st.stop()
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -75,7 +75,29 @@ def get_secret(secret_id: str) -> str:
         response = client.access_secret_version(request={"name": name})
         return response.payload.data.decode("UTF-8")
     except NotFound:
+        st.error(f"Segredo '{secret_id}' não encontrado no projeto {PROJECT_ID}.")
         return ""
+    except Exception as e:
+        st.error(f"Erro ao acessar o segredo '{secret_id}': {e}")
+        return ""
+
+if os.getenv("SPREADSHEET_ID"):
+    SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+    st.sidebar.info("SPREADSHEET_ID carregado do secrets.toml (fallback)")
+else:
+    try:
+        SPREADSHEET_ID = get_secret("SPREADSHEET_ID")
+        if SPREADSHEET_ID:
+            st.sidebar.success("ID da planilha carregado via Secret Manager")
+        else:
+            raise ValueError("SPREADSHEET_ID vazio")
+    except Exception as e:
+        st.sidebar.warning("Erro ao acessar Secret Manager: fallback necessário")
+        SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+        if not SPREADSHEET_ID:
+            st.sidebar.error("SPREADSHEET_ID não encontrado.")
+            st.error("SPREADSHEET_ID não encontrado no Secret Manager nem como variável de ambiente.")
+            st.stop()
 
 users_json = get_secret(SECRET_USERS)
 try:
