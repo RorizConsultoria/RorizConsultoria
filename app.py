@@ -57,7 +57,6 @@ if SERVICE_ACCOUNT_JSON and SERVICE_ACCOUNT_JSON.strip().startswith("{"):
     except Exception as e:
         st.sidebar.warning(f"⚠️ Erro ao analisar GOOGLE_SERVICE_ACCOUNT_JSON: {e}")
 
-SECRET_USERS = os.getenv("GCP_SECRET_ID_USERS", "USER_CREDENTIALS")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 @st.cache_data
@@ -88,12 +87,12 @@ def get_secret(secret_id: str) -> str:
         st.sidebar.error(f"Erro ao acessar o segredo '{secret_id}': {e}")
         return ""
 
-SPREADSHEET_ID = get_secret("SPREADSHEET_ID")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID") or get_secret("SPREADSHEET_ID")
 if not SPREADSHEET_ID:
     st.error("SPREADSHEET_ID não encontrado. Verifique .streamlit/secrets.toml ou Secret Manager.")
     st.stop()
 
-users_json = get_secret(SECRET_USERS)
+users_json = os.getenv("USER_CREDENTIALS") or get_secret("USER_CREDENTIALS")
 try:
     USERS = json.loads(users_json)
     if not isinstance(USERS, dict) or not USERS:
@@ -112,7 +111,7 @@ st.sidebar.subheader("🔎 Diagnóstico")
 st.sidebar.code(json.dumps({
     "PROJECT_ID": PROJECT_ID,
     "SPREADSHEET_ID": SPREADSHEET_ID,
-    "SECRET_USERS": SECRET_USERS,
+    "SECRET_USERS": "USER_CREDENTIALS",
     "SERVICE_ACCOUNT_JSON": bool(SERVICE_ACCOUNT_JSON),
     "SERVICE_ACCOUNT_FILE": Path(SERVICE_ACCOUNT_FILE).exists()
 }, indent=2), language='json')
